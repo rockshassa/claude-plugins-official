@@ -1168,6 +1168,16 @@
         "sha": "981db1f630c3116d7df0a71e5967af55b08e813c"
       },
       "homepage": "https://getoptimal.ai"
+    },
+    {
+      "name": "firetiger",
+      "description": "Claude Code plugin for Firetiger observability workflows and MCP-powered investigations.",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/firetiger-oss/claude-plugin.git",
+        "sha": "51421ce20adc7c30eb014e6847c7087ed34cb879"
+      },
+      "homepage": "https://www.firetiger.com/"
     }
   ]
 }
