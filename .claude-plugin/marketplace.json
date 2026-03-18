@@ -1158,6 +1158,16 @@
         "sha": "806a6eeeb88b9a306a59b3212a1d5d88aa5c70af"
       },
       "homepage": "https://elixir-lsp.github.io/elixir-ls/"
+    },
+    {
+      "name": "optibot",
+      "description": "AI code review that catches production-breaking bugs, business logic issues, and security vulnerabilities — directly in Claude Code.",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/Optimal-AI/optibot-skill.git",
+        "sha": "981db1f630c3116d7df0a71e5967af55b08e813c"
+      },
+      "homepage": "https://getoptimal.ai"
     }
   ]
 }
