@@ -653,8 +653,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const text = args.text as string
         const files = (args.files as string[] | undefined) ?? []
 
-        if (!allowedChatGuids().has(chat_id)) {
-          throw new Error(`chat ${chat_id} is not allowlisted — add via /imessage:access`)
+        const selfGuids = new Set<string>()
+        for (const h of SELF) {
+          for (const { guid } of qChatsForHandle.all(h)) selfGuids.add(guid)
+        }
+        if (!selfGuids.has(chat_id)) {
+          throw new Error(`reply is restricted to self-chat only`)
         }
 
         for (const f of files) {
