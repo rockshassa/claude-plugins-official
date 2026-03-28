@@ -785,19 +785,28 @@ function handleInbound(r: Row): void {
   const hasAttachments = r.cache_has_attachments === 1
   if (!text && !hasAttachments) return
 
-  // Never deliver our own sends. In self-chat the is_from_me=1 rows are empty
-  // sent-receipts anyway — the content lands on the is_from_me=0 copy below.
-  if (r.is_from_me) return
-  if (!r.handle_id) return
-  const sender = r.handle_id
+  // For is_from_me=1: handle_id is null (LEFT JOIN). Use chat_guid to detect
+  // self-chat. Self-chat outbound rows are empty sent-receipts — skip them.
+  // For non-self chats, deliver is_from_me so the owner's replies are visible.
+  if (r.is_from_me) {
+    // Resolve self-chat GUIDs from SELF addresses
+    const selfGuids = new Set<string>()
+    for (const h of SELF) {
+      for (const { guid } of qChatsForHandle.all(h)) selfGuids.add(guid)
+    }
+    if (selfGuids.has(r.chat_guid) || !text) return
+  }
+  if (!r.handle_id && !r.is_from_me) return
+  const sender = r.is_from_me ? 'me' : r.handle_id!
 
   // Self-chat: in a DM to yourself, both your typed input and our osascript
   // echoes arrive as is_from_me=0 with handle_id = your own address. Filter
   // echoes by recently-sent text; bypass the gate for what's left.
-  const isSelfChat = !isGroup && SELF.has(sender.toLowerCase())
-  if (isSelfChat && consumeEcho(r.chat_guid, text || '\x00att')) return
+  // is_from_me messages are from the owner — treat them like self-chat for gating.
+  const isSelfChat = r.is_from_me || (!isGroup && SELF.has(sender.toLowerCase()))
+  if (isSelfChat && !r.is_from_me && consumeEcho(r.chat_guid, text || '\x00att')) return
 
-  // Self-chat bypasses access control — you're the owner.
+  // Self-chat and owner's outbound messages bypass access control.
   if (!isSelfChat) {
     const result = gate({
       senderId: sender,
