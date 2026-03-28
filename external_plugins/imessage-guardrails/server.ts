@@ -786,9 +786,33 @@ function handleInbound(r: Row): void {
   const hasAttachments = r.cache_has_attachments === 1
   if (!text && !hasAttachments) return
 
-  // Never deliver our own sends. In self-chat the is_from_me=1 rows are empty
-  // sent-receipts anyway — the content lands on the is_from_me=0 copy below.
-  if (r.is_from_me) return
+  // Outbound messages (is_from_me=1): deliver for allowlisted non-self chats
+  // so the monitor can see both sides of a conversation. Skip gate/pairing/
+  // permission logic — those only apply to inbound. Self-chat is_from_me=1
+  // rows are empty sent-receipts (content lands on the is_from_me=0 copy).
+  if (r.is_from_me) {
+    if (!allowedChatGuids().has(r.chat_guid)) return
+    // Skip self-chat — is_from_me=1 in self-chat is just a sent-receipt.
+    const selfGuids = new Set<string>()
+    for (const h of SELF) {
+      for (const { guid } of qChatsForHandle.all(h)) selfGuids.add(guid)
+    }
+    if (selfGuids.has(r.chat_guid)) return
+    void mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content: text || '',
+        meta: {
+          chat_id: r.chat_guid,
+          message_id: r.guid,
+          user: 'niko',
+          ts: appleDate(r.date).toISOString(),
+        },
+      },
+    })
+    return
+  }
+
   if (!r.handle_id) return
   const sender = r.handle_id
 
