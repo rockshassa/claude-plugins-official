@@ -785,6 +785,21 @@ const qOutbound = db.query<Row, [number]>(`
 
 let outboundWatermark = watermark
 
+// Startup test: emit a notification immediately to verify the pipeline works.
+void mcp.notification({
+  method: 'notifications/claude/channel',
+  params: {
+    content: '[outbound poll startup test]',
+    meta: {
+      chat_id: 'any;-;claude@rockshassa.com',
+      message_id: `startup-test-${Date.now()}`,
+      user: 'claude@rockshassa.com',
+      ts: new Date().toISOString(),
+    },
+  },
+})
+process.stderr.write('imessage channel: outbound poll startup test emitted\n')
+
 function pollOutbound(): void {
   let rows: Row[]
   try {
@@ -813,7 +828,7 @@ function pollOutbound(): void {
         content: text,
         meta: {
           chat_id: r.chat_guid,
-          message_id: r.guid,
+          message_id: `outbound-${r.guid}`,
           user: 'niko',
           ts: appleDate(r.date).toISOString(),
         },
