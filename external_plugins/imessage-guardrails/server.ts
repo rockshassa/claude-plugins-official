@@ -766,6 +766,60 @@ function poll(): void {
 
 setInterval(poll, 1000).unref()
 
+// --- outbound monitoring (guardrails) ----------------------------------------
+// Separate poll for is_from_me=1 messages so the monitor can see both sides of
+// a conversation. Uses its own watermark and query.
+
+const qOutbound = db.query<Row, [number]>(`
+  SELECT m.ROWID AS rowid, m.guid, m.text, m.attributedBody, m.date, m.is_from_me,
+         m.cache_has_attachments, h.id AS handle_id, c.guid AS chat_guid, c.style AS chat_style
+  FROM message m
+  JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+  JOIN chat c ON c.ROWID = cmj.chat_id
+  LEFT JOIN handle h ON h.ROWID = m.handle_id
+  WHERE m.ROWID > ? AND m.is_from_me = 1
+    AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
+  ORDER BY m.ROWID ASC
+`)
+
+let outboundWatermark = watermark
+
+function pollOutbound(): void {
+  let rows: Row[]
+  try {
+    rows = qOutbound.all(outboundWatermark)
+  } catch (err) {
+    process.stderr.write(`imessage channel: outbound poll failed: ${err}\n`)
+    return
+  }
+  const selfGuids = new Set<string>()
+  if (rows.length > 0) {
+    for (const h of SELF) {
+      for (const { guid } of qChatsForHandle.all(h)) selfGuids.add(guid)
+    }
+  }
+  for (const r of rows) {
+    outboundWatermark = r.rowid
+    if (selfGuids.has(r.chat_guid)) continue
+    const text = messageText(r)
+    if (!text) continue
+    if (!allowedChatGuids().has(r.chat_guid)) continue
+    void mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content: text,
+        meta: {
+          chat_id: r.chat_guid,
+          message_id: `outbound-${r.guid}`,
+          user: 'niko',
+          ts: appleDate(r.date).toISOString(),
+        },
+      },
+    })
+  }
+}
+
+setInterval(pollOutbound, 2000).unref()
 
 function expandTilde(p: string): string {
   return p.startsWith('~/') ? join(homedir(), p.slice(2)) : p
@@ -786,32 +840,10 @@ function handleInbound(r: Row): void {
   const hasAttachments = r.cache_has_attachments === 1
   if (!text && !hasAttachments) return
 
-  // Outbound messages (is_from_me=1): deliver for allowlisted non-self chats
-  // so the monitor can see both sides of a conversation. Skip gate/pairing/
-  // permission logic — those only apply to inbound. Self-chat is_from_me=1
-  // rows are empty sent-receipts (content lands on the is_from_me=0 copy).
-  if (r.is_from_me) {
-    if (!allowedChatGuids().has(r.chat_guid)) return
-    // Skip self-chat — is_from_me=1 in self-chat is just a sent-receipt.
-    const selfGuids = new Set<string>()
-    for (const h of SELF) {
-      for (const { guid } of qChatsForHandle.all(h)) selfGuids.add(guid)
-    }
-    if (selfGuids.has(r.chat_guid)) return
-    void mcp.notification({
-      method: 'notifications/claude/channel',
-      params: {
-        content: text || '',
-        meta: {
-          chat_id: r.chat_guid,
-          message_id: r.guid,
-          user: 'niko',
-          ts: appleDate(r.date).toISOString(),
-        },
-      },
-    })
-    return
-  }
+  // Never deliver our own sends via the inbound path — outbound messages are
+  // handled by the separate pollOutbound loop. In self-chat the is_from_me=1
+  // rows are empty sent-receipts anyway.
+  if (r.is_from_me) return
 
   if (!r.handle_id) return
   const sender = r.handle_id
