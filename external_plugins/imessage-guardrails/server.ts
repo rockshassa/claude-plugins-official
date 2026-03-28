@@ -123,16 +123,6 @@ const qPoll = db.query<Row, [number]>(`
   ORDER BY m.ROWID ASC
 `)
 
-const qRefetch = db.query<Row, [number]>(`
-  SELECT m.ROWID AS rowid, m.guid, m.text, m.attributedBody, m.date, m.is_from_me,
-         m.cache_has_attachments, h.id AS handle_id, c.guid AS chat_guid, c.style AS chat_style
-  FROM message m
-  JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-  JOIN chat c ON c.ROWID = cmj.chat_id
-  LEFT JOIN handle h ON h.ROWID = m.handle_id
-  WHERE m.ROWID = ?
-`)
-
 const qHistory = db.query<Row, [string, number]>(`
   SELECT m.ROWID AS rowid, m.guid, m.text, m.attributedBody, m.date, m.is_from_me,
          m.cache_has_attachments, h.id AS handle_id, c.guid AS chat_guid, c.style AS chat_style
@@ -760,11 +750,6 @@ process.on('SIGINT', shutdown)
 let watermark = qWatermark.get()?.max ?? 0
 process.stderr.write(`imessage channel: watching chat.db (watermark=${watermark})\n`)
 
-// Deferred is_from_me rows: macOS inserts a skeleton row first, then fills in
-// attributedBody async. We defer these and retry after a short delay.
-const deferred = new Map<number, number>() // rowid → retries remaining
-const DEFER_MAX_RETRIES = 5
-
 function poll(): void {
   let rows: Row[]
   try {
@@ -775,32 +760,69 @@ function poll(): void {
   }
   for (const r of rows) {
     watermark = r.rowid
-    // Defer is_from_me rows with no text — content may not be populated yet.
-    const text = r.text ?? (r.attributedBody ? '' : null)
-    if (r.is_from_me && !r.text && !r.attributedBody) {
-      deferred.set(r.rowid, DEFER_MAX_RETRIES)
-    } else {
-      handleInbound(r)
-    }
-  }
-
-  // Retry deferred rows.
-  for (const [rowid, retries] of deferred) {
-    const fresh = qRefetch.get(rowid)
-    if (!fresh) { deferred.delete(rowid); continue }
-    const hasContent = fresh.text || fresh.attributedBody
-    if (hasContent) {
-      deferred.delete(rowid)
-      handleInbound(fresh)
-    } else if (retries <= 1) {
-      deferred.delete(rowid)
-    } else {
-      deferred.set(rowid, retries - 1)
-    }
+    handleInbound(r)
   }
 }
 
 setInterval(poll, 1000).unref()
+
+// --- outbound monitoring (guardrails) ----------------------------------------
+// Separate poll for is_from_me=1 messages so the monitor can see both sides of
+// a conversation. Uses its own watermark and query. Emits the same channel
+// notification shape but with user="niko" to avoid harness echo-suppression.
+
+const qOutbound = db.query<Row, [number]>(`
+  SELECT m.ROWID AS rowid, m.guid, m.text, m.attributedBody, m.date, m.is_from_me,
+         m.cache_has_attachments, h.id AS handle_id, c.guid AS chat_guid, c.style AS chat_style
+  FROM message m
+  JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+  JOIN chat c ON c.ROWID = cmj.chat_id
+  LEFT JOIN handle h ON h.ROWID = m.handle_id
+  WHERE m.ROWID > ? AND m.is_from_me = 1
+    AND (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
+  ORDER BY m.ROWID ASC
+`)
+
+let outboundWatermark = watermark
+
+function pollOutbound(): void {
+  let rows: Row[]
+  try {
+    rows = qOutbound.all(outboundWatermark)
+  } catch (err) {
+    process.stderr.write(`imessage channel: outbound poll failed: ${err}\n`)
+    return
+  }
+  const selfGuids = new Set<string>()
+  if (rows.length > 0) {
+    for (const h of SELF) {
+      for (const { guid } of qChatsForHandle.all(h)) selfGuids.add(guid)
+    }
+  }
+  for (const r of rows) {
+    outboundWatermark = r.rowid
+    // Skip self-chat (alerts we sent) and empty rows.
+    if (selfGuids.has(r.chat_guid)) continue
+    const text = messageText(r)
+    if (!text) continue
+    // Only emit for allowlisted chats.
+    if (!allowedChatGuids().has(r.chat_guid)) continue
+    void mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content: text,
+        meta: {
+          chat_id: r.chat_guid,
+          message_id: r.guid,
+          user: 'niko',
+          ts: appleDate(r.date).toISOString(),
+        },
+      },
+    })
+  }
+}
+
+setInterval(pollOutbound, 2000).unref()
 
 function expandTilde(p: string): string {
   return p.startsWith('~/') ? join(homedir(), p.slice(2)) : p
@@ -821,28 +843,19 @@ function handleInbound(r: Row): void {
   const hasAttachments = r.cache_has_attachments === 1
   if (!text && !hasAttachments) return
 
-  // For is_from_me=1: handle_id is null (LEFT JOIN). Use chat_guid to detect
-  // self-chat. Self-chat outbound rows are empty sent-receipts — skip them.
-  // For non-self chats, deliver is_from_me so the owner's replies are visible.
-  if (r.is_from_me) {
-    // Resolve self-chat GUIDs from SELF addresses
-    const selfGuids = new Set<string>()
-    for (const h of SELF) {
-      for (const { guid } of qChatsForHandle.all(h)) selfGuids.add(guid)
-    }
-    if (selfGuids.has(r.chat_guid) || !text) return
-  }
-  if (!r.handle_id && !r.is_from_me) return
-  const sender = r.is_from_me ? 'me' : r.handle_id!
+  // Never deliver our own sends. In self-chat the is_from_me=1 rows are empty
+  // sent-receipts anyway — the content lands on the is_from_me=0 copy below.
+  if (r.is_from_me) return
+  if (!r.handle_id) return
+  const sender = r.handle_id
 
   // Self-chat: in a DM to yourself, both your typed input and our osascript
   // echoes arrive as is_from_me=0 with handle_id = your own address. Filter
   // echoes by recently-sent text; bypass the gate for what's left.
-  // is_from_me messages are from the owner — treat them like self-chat for gating.
-  const isSelfChat = r.is_from_me || (!isGroup && SELF.has(sender.toLowerCase()))
-  if (isSelfChat && !r.is_from_me && consumeEcho(r.chat_guid, text || '\x00att')) return
+  const isSelfChat = !isGroup && SELF.has(sender.toLowerCase())
+  if (isSelfChat && consumeEcho(r.chat_guid, text || '\x00att')) return
 
-  // Self-chat and owner's outbound messages bypass access control.
+  // Self-chat bypasses access control — you're the owner.
   if (!isSelfChat) {
     const result = gate({
       senderId: sender,
