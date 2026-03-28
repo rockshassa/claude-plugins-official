@@ -794,7 +794,9 @@ function handleInbound(r: Row): void {
     for (const h of SELF) {
       for (const { guid } of qChatsForHandle.all(h)) selfGuids.add(guid)
     }
-    if (selfGuids.has(r.chat_guid) || !text) return
+    const isSelfGuid = selfGuids.has(r.chat_guid)
+    process.stderr.write(`imessage channel: is_from_me row=${r.rowid} chat=${r.chat_guid} text=${!!text} selfGuid=${isSelfGuid} handle=${r.handle_id}\n`)
+    if (isSelfGuid || !text) return
   }
   if (!r.handle_id && !r.is_from_me) return
   const sender = r.is_from_me ? 'me' : r.handle_id!
