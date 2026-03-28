@@ -123,6 +123,16 @@ const qPoll = db.query<Row, [number]>(`
   ORDER BY m.ROWID ASC
 `)
 
+const qRefetch = db.query<Row, [number]>(`
+  SELECT m.ROWID AS rowid, m.guid, m.text, m.attributedBody, m.date, m.is_from_me,
+         m.cache_has_attachments, h.id AS handle_id, c.guid AS chat_guid, c.style AS chat_style
+  FROM message m
+  JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+  JOIN chat c ON c.ROWID = cmj.chat_id
+  LEFT JOIN handle h ON h.ROWID = m.handle_id
+  WHERE m.ROWID = ?
+`)
+
 const qHistory = db.query<Row, [string, number]>(`
   SELECT m.ROWID AS rowid, m.guid, m.text, m.attributedBody, m.date, m.is_from_me,
          m.cache_has_attachments, h.id AS handle_id, c.guid AS chat_guid, c.style AS chat_style
@@ -750,6 +760,11 @@ process.on('SIGINT', shutdown)
 let watermark = qWatermark.get()?.max ?? 0
 process.stderr.write(`imessage channel: watching chat.db (watermark=${watermark})\n`)
 
+// Deferred is_from_me rows: macOS inserts a skeleton row first, then fills in
+// attributedBody async. We defer these and retry after a short delay.
+const deferred = new Map<number, number>() // rowid → retries remaining
+const DEFER_MAX_RETRIES = 5
+
 function poll(): void {
   let rows: Row[]
   try {
@@ -760,7 +775,28 @@ function poll(): void {
   }
   for (const r of rows) {
     watermark = r.rowid
-    handleInbound(r)
+    // Defer is_from_me rows with no text — content may not be populated yet.
+    const text = r.text ?? (r.attributedBody ? '' : null)
+    if (r.is_from_me && !r.text && !r.attributedBody) {
+      deferred.set(r.rowid, DEFER_MAX_RETRIES)
+    } else {
+      handleInbound(r)
+    }
+  }
+
+  // Retry deferred rows.
+  for (const [rowid, retries] of deferred) {
+    const fresh = qRefetch.get(rowid)
+    if (!fresh) { deferred.delete(rowid); continue }
+    const hasContent = fresh.text || fresh.attributedBody
+    if (hasContent) {
+      deferred.delete(rowid)
+      handleInbound(fresh)
+    } else if (retries <= 1) {
+      deferred.delete(rowid)
+    } else {
+      deferred.set(rowid, retries - 1)
+    }
   }
 }
 
@@ -794,9 +830,7 @@ function handleInbound(r: Row): void {
     for (const h of SELF) {
       for (const { guid } of qChatsForHandle.all(h)) selfGuids.add(guid)
     }
-    const isSelfGuid = selfGuids.has(r.chat_guid)
-    process.stderr.write(`imessage channel: is_from_me row=${r.rowid} chat=${r.chat_guid} text=${!!text} selfGuid=${isSelfGuid} handle=${r.handle_id}\n`)
-    if (isSelfGuid || !text) return
+    if (selfGuids.has(r.chat_guid) || !text) return
   }
   if (!r.handle_id && !r.is_from_me) return
   const sender = r.is_from_me ? 'me' : r.handle_id!
