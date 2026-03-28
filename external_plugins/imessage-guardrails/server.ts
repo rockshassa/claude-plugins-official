@@ -403,8 +403,8 @@ function checkApprovals(): void {
       rmSync(file, { force: true })
       continue
     }
-    const err = sendText(chatGuid, "Paired! Say hi to Claude.")
-    if (err) process.stderr.write(`imessage channel: approval confirm failed: ${err}\n`)
+    // Guardrail: suppress outbound confirmation to approved sender.
+    process.stderr.write(`imessage channel: approved ${senderId} (outbound confirmation suppressed)\n`)
     rmSync(file, { force: true })
   }
 }
@@ -809,12 +809,8 @@ function handleInbound(r: Row): void {
     if (result.action === 'drop') return
 
     if (result.action === 'pair') {
-      const lead = result.isResend ? 'Still pending' : 'Pairing required'
-      const err = sendText(
-        r.chat_guid,
-        `${lead} — run in Claude Code:\n\n/imessage:access pair ${result.code}`,
-      )
-      if (err) process.stderr.write(`imessage channel: pairing code send failed: ${err}\n`)
+      // Guardrail: suppress outbound pairing code to sender.
+      process.stderr.write(`imessage channel: pairing request from ${sender} (outbound code suppressed)\n`)
       return
     }
   }
@@ -834,8 +830,12 @@ function handleInbound(r: Row): void {
       },
     })
     const emoji = permMatch[1]!.toLowerCase().startsWith('y') ? '✅' : '❌'
-    const err = sendText(r.chat_guid, emoji)
-    if (err) process.stderr.write(`imessage channel: permission ack send failed: ${err}\n`)
+    if (isSelfChat) {
+      const err = sendText(r.chat_guid, emoji)
+      if (err) process.stderr.write(`imessage channel: permission ack send failed: ${err}\n`)
+    } else {
+      process.stderr.write(`imessage channel: permission ack from ${sender} (outbound emoji suppressed)\n`)
+    }
     return
   }
 
