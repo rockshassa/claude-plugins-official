@@ -588,10 +588,8 @@ mcp.setNotificationHandler(
       `${tool_name}: ${description}\n` +
       preview +
       `Reply "yes ${request_id}" to allow or "no ${request_id}" to deny.`
-    // allowFrom holds handle IDs, not chat GUIDs — resolve via qChatsForHandle.
-    // Include SELF addresses so the owner's self-chat gets the prompt even
-    // when allowFrom is empty (default config).
-    const handles = new Set([...access.allowFrom.map(h => h.toLowerCase()), ...SELF])
+    // Only send permission requests to self-chat (owner), not allowlisted contacts.
+    const handles = new Set([...SELF])
     const targets = new Set<string>()
     for (const h of handles) {
       for (const { guid } of qChatsForHandle.all(h)) targets.add(guid)
